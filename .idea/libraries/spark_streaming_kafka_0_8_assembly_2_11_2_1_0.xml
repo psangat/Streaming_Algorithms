@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="spark-streaming-kafka-0-8-assembly_2.11-2.1.0">
+    <CLASSES>
+      <root url="jar://C:/Applications/BigData/streaming/spark-streaming-kafka-0-8-assembly_2.11-2.1.0.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
