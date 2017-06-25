@@ -10,5 +10,6 @@
     <orderEntry type="library" name="scala-sdk-2.10.4" level="application" />
     <orderEntry type="library" name="datanucleus-api-jdo-3.2.6" level="project" />
     <orderEntry type="library" name="spark-streaming-kafka-0-8-assembly_2.11-2.1.0" level="project" />
+    <orderEntry type="library" name="classmexer" level="project" />
   </component>
 </module>
