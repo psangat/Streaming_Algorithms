@@ -18,18 +18,22 @@ object main {
   val m12 = new mutable.HashMap[String, Array[mutable.ListBuffer[String]]]
   val m123 = new mutable.HashMap[String, Array[mutable.ListBuffer[String]]]
   val mFix = List(m1, m2, m3, m4)
-  val MAX_HASH_TABLE_SIZE = 24
+  val MAX_HASH_TABLE_SIZE = 1024000000
+  // 1GB ??
   // bytes
+  val hashTableR = new mutable.HashMap[String, mutable.ListBuffer[String]]
+  val hashTableS = new mutable.HashMap[String, mutable.ListBuffer[String]]
   val hashTableCollectionR = new mutable.HashMap[String, mutable.HashMap[String, mutable.ListBuffer[String]]]
   // Global Variables
   var firstTime = 0L
+  var y = new mutable.BitSet()
+  var bittot = new mutable.BitSet(mFix.length)
+  var kafkaServer = "118.138.244.164:9092"
   y += 1
   var isFirst = true
   for (i <- mFix.indices)
     bittot += i
-  var y = new mutable.BitSet()
-  var bittot = new mutable.BitSet(mFix.length)
-  var kafkaServer = "118.138.244.164:9092"
+
 
   def main(args: Array[String]): Unit = {
     // Disabling the logs of type "org" and "akka"
@@ -41,7 +45,8 @@ object main {
       sys.exit()
     }
 
-    val master = "local[*]" // At least 2 required, 1 thread used to run receiver. local[n] n > number of receivers
+    val master = "local[*]"
+    // At least 2 required, 1 thread used to run receiver. local[n] n > number of receivers
     val ssc = new StreamingContext(master, "Kafka Streaming", Seconds(1))
     val kafkaParams = Map("metadata.broker.list" -> kafkaServer)
     val topics1 = List("stream1").toSet
@@ -61,17 +66,19 @@ object main {
 
 
     words1.foreachRDD(rdd => rdd.foreach {
+      // stream for R
       case (k, v) => if (args(0).equals("x")) xJoin(k, v, m1, 0)
       else if (args(0).equals("m")) mJoin(k, v, m1, 0)
       else if (args(0).equals("am")) amJoin(k, v, m1, 0)
-      else earlyHashJoin(k, v, m1, 0)
+      else earlyHashJoin(k, v, "1M", "R")
     })
 
     words2.foreachRDD(rdd => rdd.foreach {
+      // stream for S
       case (k, v) => if (args(0).equals("x")) xJoin(k, v, m2, 1)
       else if (args(0).equals("m")) mJoin(k, v, m2, 1)
       else if (args(0).equals("am")) amJoin(k, v, m2, 1)
-      else earlyHashJoin(k, v, m2, 0)
+      else earlyHashJoin(k, v, "1M", "S")
     })
 
     //    words3.foreachRDD(rdd => rdd.foreach {
@@ -88,45 +95,87 @@ object main {
 
     ssc.start() // Start the computation
     ssc.awaitTermination() // Wait for the computation to terminate
+
+    // Clean Up phase is performed after streams are over
+    val cleanUpPhaseStartTime = System.currentTimeMillis()
+    val finalOutput = earlyHashJoinCleanupPhase(hashTableCollectionR)
+    val cleanUpPhaseEndTime = System.currentTimeMillis()
+    println("Time Taken for CleanUP Phase: {0}", cleanUpPhaseEndTime - cleanUpPhaseStartTime)
+    finalOutput.foreach(println)
   }
 
 
-  def earlyHashJoin(key: String, value: String, hashTable: mutable.HashMap[String, mutable.ListBuffer[String]], ix: Int): Unit = {
-    if (isFirst) {
-      isFirst = false
-      firstTime = System.currentTimeMillis()
-    }
-
-    if (hashTable.contains(key)) {
-      hashTable(key) += value
+  def earlyHashJoin(key: String, value: String, joinType: String, whichStream: String): Unit = {
+    val phase1StartTime = System.currentTimeMillis()
+    // One to Many Join
+    if (joinType.equals("1M")) {
+      whichStream match {
+        case "R" => if (hashTableS.contains(key)) {
+          println(key, value, hashTableS.get(key))
+          hashTableR(key) = mutable.ListBuffer(value)
+          hashTableS.remove(key)
+        }
+        else {
+          hashTableR(key) = mutable.ListBuffer(value)
+        }
+        case "S" => if (hashTableR.contains(key)) {
+          println(key, value, hashTableR.get(key))
+        }
+        else {
+          hashTableS(key) = mutable.ListBuffer(value)
+        }
+      }
     }
     else {
-      hashTable(key) = mutable.ListBuffer(value)
+      // Many to Many
+      whichStream match {
+        case "R" => if (hashTableS.contains(key)) {
+          println(key, value, hashTableS.get(key))
+          if (hashTableR.contains(key)) {
+            hashTableR(key) += value
+          }
+          else {
+            hashTableR(key) = mutable.ListBuffer(value)
+          }
+        }
+        else {
+          hashTableR(key) = mutable.ListBuffer(value)
+        }
+        case "S" => if (hashTableR.contains(key)) {
+          println(key, value, hashTableR.get(key))
+          if (hashTableS.contains(key)) {
+            hashTableS(key) += value
+          }
+          else {
+            hashTableS(key) = mutable.ListBuffer(value)
+          }
+        }
+        else {
+          hashTableS(key) = mutable.ListBuffer(value)
+        }
+      }
     }
+    val phase1EndTime = System.currentTimeMillis()
+    // println("Time Taken for Phase1: {0}", phase1EndTime - phase1StartTime)
 
     // Biased Flushing Policy
-
-    val hashTableSize = MemoryUtil.deepMemoryUsageOf(m1)
+    val flushingPhaseStartTime = System.currentTimeMillis()
+    val hashTableSize = MemoryUtil.deepMemoryUsageOf(hashTableS)
     //println(hashTableSize)
     // Flushing Phase
     if (hashTableSize >= MAX_HASH_TABLE_SIZE) {
-      val fileName = System.currentTimeMillis().toString()
-      hashTableCollectionR(fileName) = m1
-      val fos = new FileOutputStream("C:\\Raw_Data_Source_For_Test\\StreamingAlgorithmsOutput\\" + fileName + ".ser")
+      val flushTimeStamp = System.currentTimeMillis().toString()
+      hashTableCollectionR(flushTimeStamp) = hashTableR
+      val fos = new FileOutputStream("C:\\Raw_Data_Source_For_Test\\StreamingAlgorithmsOutput\\" + flushTimeStamp + ".ser")
       val oos = new ObjectOutputStream(fos)
-      oos.writeObject(m2)
+      oos.writeObject(hashTableS)
       oos.close()
-      m2.clear()
-      m1.clear()
-      //      val fis = new FileInputStream("c://list.ser")
-      //      val ois = new ObjectInputStream(fis)
-      //      val anotherList = ois.readObject()
-      //      ois.close()
-      //      println(anotherList)
+      hashTableR.clear()
+      hashTableS.clear()
     }
-
+    val flushingPhaseEndTime = System.currentTimeMillis()
+    // println("Time Taken for Flushing Phase: {0}", flushingPhaseEndTime - flushingPhaseStartTime)
     // Cleanup Phase
-
   }
 
   def xJoin(k: String, v: String, m: mutable.HashMap[String, mutable.ListBuffer[String]], ix: Int): Unit = {
