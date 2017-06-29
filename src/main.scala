@@ -7,6 +7,7 @@ import org.apache.spark.streaming.kafka.KafkaUtils
 import org.apache.spark.streaming.{Seconds, StreamingContext}
 
 import scala.collection.mutable
+import scala.collection.mutable.ListBuffer
 
 object main {
 
@@ -23,7 +24,15 @@ object main {
   // bytes
   val hashTableR = new mutable.HashMap[String, mutable.ListBuffer[String]]
   val hashTableS = new mutable.HashMap[String, mutable.ListBuffer[String]]
+  val hashTableT = new mutable.HashMap[String, mutable.ListBuffer[String]]
+  val hashTableU = new mutable.HashMap[String, mutable.ListBuffer[String]]
   val hashTableCollectionR = new mutable.HashMap[String, mutable.HashMap[String, mutable.ListBuffer[String]]]
+
+  val hashTableRSlice = new mutable.HashMap[String, mutable.ListBuffer[(String, String)]]
+  val hashTableSSlice = new mutable.HashMap[String, mutable.ListBuffer[(String, String)]]
+  val hashTableTSlice = new mutable.HashMap[String, mutable.ListBuffer[(String, String)]]
+  val hashTableUSlice = new mutable.HashMap[String, mutable.ListBuffer[(String, String)]]
+  val indirectPartitionMapper = new mutable.HashMap[String, mutable.ListBuffer[(String, String)]]
   // Global Variables
   var firstTime = 0L
   var y = new mutable.BitSet()
@@ -51,18 +60,18 @@ object main {
     val kafkaParams = Map("metadata.broker.list" -> kafkaServer)
     val topics1 = List("stream1").toSet
     val topics2 = List("stream2").toSet
-    //    val topics3 = List("stream3").toSet
-    //    val topics4 = List("stream4").toSet
+    val topics3 = List("stream3").toSet
+    val topics4 = List("stream4").toSet
 
     val stream1 = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, topics1)
     val stream2 = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, topics2)
-    //    val stream3 = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, topics3)
-    //    val stream4 = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, topics4)
+    val stream3 = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, topics3)
+    val stream4 = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, topics4)
 
     val words1 = stream1.map(_._2).map(x => (x.split(" ")(0), x.split(" ")(1)))
     val words2 = stream2.map(_._2).map(x => (x.split(" ")(0), x.split(" ")(1)))
-    //    val words3 = stream3.map(_._2).map(x => (x.split(" ")(0), x.split(" ")(1)))
-    //    val words4 = stream4.map(_._2).map(x => (x.split(" ")(0), x.split(" ")(1)))
+    val words3 = stream3.map(_._2).map(x => (x.split(" ")(0), x.split(" ")(1)))
+    val words4 = stream4.map(_._2).map(x => (x.split(" ")(0), x.split(" ")(1)))
 
 
     words1.foreachRDD(rdd => rdd.foreach {
@@ -70,7 +79,10 @@ object main {
       case (k, v) => if (args(0).equals("x")) xJoin(k, v, m1, 0)
       else if (args(0).equals("m")) mJoin(k, v, m1, 0)
       else if (args(0).equals("am")) amJoin(k, v, m1, 0)
-      else earlyHashJoin(k, v, "1M", "R")
+      else if (args(0).equals("ehj")) earlyHashJoin(k, v, "1M", "R")
+      // CA = Common Attribute
+      // DA = Distinct Attribute
+      else if (args(0).equals("sj")) sliceJoin(k, v, "CA", "R")
     })
 
     words2.foreachRDD(rdd => rdd.foreach {
@@ -78,30 +90,33 @@ object main {
       case (k, v) => if (args(0).equals("x")) xJoin(k, v, m2, 1)
       else if (args(0).equals("m")) mJoin(k, v, m2, 1)
       else if (args(0).equals("am")) amJoin(k, v, m2, 1)
-      else earlyHashJoin(k, v, "1M", "S")
+      else if (args(0).equals("ehj")) earlyHashJoin(k, v, "1M", "S")
+      else if (args(0).equals("sj")) sliceJoin(k, v, "CA", "S")
     })
 
-    //    words3.foreachRDD(rdd => rdd.foreach {
-    //      case (k, v) => if (args(0).equals("x")) xJoin(k, v, m3, 2)
-    //      else if (args(0).equals("m")) mJoin(k, v, m3, 2)
-    //      else if (args(0).equals("am")) amJoin(k, v, m3, 2)
-    //    })
-    //
-    //    words4.foreachRDD(rdd => rdd.foreach {
-    //      case (k, v) => if (args(0).equals("x")) xJoin(k, v, m4, 3)
-    //      else if (args(0).equals("m")) mJoin(k, v, m4, 3)
-    //      else if (args(0).equals("am")) amJoin(k, v, m4, 3)
-    //    })
+    words3.foreachRDD(rdd => rdd.foreach {
+      case (k, v) => if (args(0).equals("x")) xJoin(k, v, m3, 2)
+      else if (args(0).equals("m")) mJoin(k, v, m3, 2)
+      else if (args(0).equals("am")) amJoin(k, v, m3, 2)
+      else if (args(0).equals("sj")) sliceJoin(k, v, "CA", "T")
+    })
+
+    words4.foreachRDD(rdd => rdd.foreach {
+      case (k, v) => if (args(0).equals("x")) xJoin(k, v, m4, 3)
+      else if (args(0).equals("m")) mJoin(k, v, m4, 3)
+      else if (args(0).equals("am")) amJoin(k, v, m4, 3)
+      else if (args(0).equals("sj")) sliceJoin(k, v, "CA", "U")
+    })
 
     ssc.start() // Start the computation
     ssc.awaitTermination() // Wait for the computation to terminate
 
     // Clean Up phase is performed after streams are over
-    val cleanUpPhaseStartTime = System.currentTimeMillis()
-    val finalOutput = earlyHashJoinCleanupPhase(hashTableCollectionR)
-    val cleanUpPhaseEndTime = System.currentTimeMillis()
-    println("Time Taken for CleanUP Phase: {0}", cleanUpPhaseEndTime - cleanUpPhaseStartTime)
-    finalOutput.foreach(println)
+    //    val cleanUpPhaseStartTime = System.currentTimeMillis()
+    //    val finalOutput = earlyHashJoinCleanupPhase(hashTableCollectionR)
+    //    val cleanUpPhaseEndTime = System.currentTimeMillis()
+    //    println("Time Taken for CleanUP Phase: {0}", cleanUpPhaseEndTime - cleanUpPhaseStartTime)
+    //    finalOutput.foreach(println)
   }
 
 
@@ -176,6 +191,145 @@ object main {
     val flushingPhaseEndTime = System.currentTimeMillis()
     // println("Time Taken for Flushing Phase: {0}", flushingPhaseEndTime - flushingPhaseStartTime)
     // Cleanup Phase
+  }
+
+  def sliceJoin(key: String, value: String, joinType: String, whichStream: String): Unit = {
+    if (joinType.equals("CA")) {
+      whichStream match {
+        // Common Attribute Join [Key is the common attribute]
+        case "R" => if (hashTableRSlice.contains(key)) {
+          hashTableRSlice(key) += ((key, value))
+        } else {
+          val listBuffer: mutable.ListBuffer[(String, String)] = ListBuffer()
+          listBuffer += ((key, value))
+          hashTableRSlice(key) = listBuffer
+        }
+          if (hashTableSSlice.contains(key) && hashTableTSlice.contains(key) && hashTableUSlice.contains(key)) {
+            println(key, value, hashTableSSlice.get(key), hashTableTSlice.get(key), hashTableUSlice.get(key))
+          }
+
+
+        case "S" => if (hashTableSSlice.contains(key)) {
+          hashTableSSlice(key) += ((key, value))
+        } else {
+          val listBuffer: mutable.ListBuffer[(String, String)] = ListBuffer()
+          listBuffer += ((key, value))
+          hashTableSSlice(key) = listBuffer
+        }
+          if (hashTableRSlice.contains(key) && hashTableTSlice.contains(key) && hashTableUSlice.contains(key)) {
+            println(key, value, hashTableRSlice.get(key), hashTableTSlice.get(key), hashTableUSlice.get(key))
+          }
+
+
+        case "T" => if (hashTableTSlice.contains(key)) {
+          hashTableTSlice(key) += ((key, value))
+        } else {
+          val listBuffer: mutable.ListBuffer[(String, String)] = ListBuffer()
+          listBuffer += ((key, value))
+          hashTableTSlice(key) = listBuffer
+        }
+          if (hashTableRSlice.contains(key) && hashTableSSlice.contains(key) && hashTableUSlice.contains(key)) {
+            println(key, value, hashTableRSlice.get(key), hashTableSSlice.get(key), hashTableUSlice.get(key))
+          }
+
+        case "U" => if (hashTableUSlice.contains(key)) {
+          hashTableUSlice(key) += ((key, value))
+        } else {
+          val listBuffer: mutable.ListBuffer[(String, String)] = ListBuffer()
+          listBuffer += ((key, value))
+          hashTableUSlice(key) = listBuffer
+        }
+          if (hashTableRSlice.contains(key) && hashTableSSlice.contains(key) && hashTableTSlice.contains(key)) {
+            println(key, value, hashTableRSlice.get(key), hashTableSSlice.get(key), hashTableTSlice.get(key))
+          }
+      }
+    }
+    else {
+      // Distinct Attribute Join using mapping function
+      // R -> (a,b)
+      // S -> (a,c)
+      // T -> (c,d)
+      // U -> (a,e)
+      whichStream match {
+        case "R" => if (hashTableRSlice.contains(key)) {
+          hashTableRSlice(key) += ((key, value))
+        } else {
+          val listBuffer: mutable.ListBuffer[(String, String)] = ListBuffer()
+          listBuffer += ((key, value))
+          hashTableRSlice(key) = listBuffer
+        }
+          if (hashTableSSlice.contains(key) && hashTableUSlice.contains(key)) {
+            // implementation of slice mapping
+            val mappingList = hashTableSSlice.get(key).get // list buffer of key values
+            mappingList.foreach { kvPair =>
+              if (hashTableTSlice.contains(kvPair._2)) {
+                println(key, value, hashTableTSlice.get(kvPair._2), hashTableUSlice.get(key))
+              }
+            }
+            // implementation of slice mapping complete
+          }
+        case "S" =>
+          if (hashTableSSlice.contains(key)) {
+            hashTableSSlice(key) += ((key, value))
+          } else {
+            val listBuffer: mutable.ListBuffer[(String, String)] = ListBuffer()
+            listBuffer += ((key, value))
+            hashTableSSlice(key) = listBuffer
+          }
+
+          if (indirectPartitionMapper.contains(value)) {
+            // used for mapping in stream T
+            indirectPartitionMapper(value) += ((value, key))
+          }
+          else {
+            val listBuffer: mutable.ListBuffer[(String, String)] = ListBuffer()
+            listBuffer += ((value, key))
+            indirectPartitionMapper(value) = listBuffer
+          }
+
+          if (hashTableRSlice.contains(key) && hashTableTSlice.contains(value) && hashTableUSlice.contains(key)) {
+            // does not need slice mapping here
+            println(key, value, hashTableRSlice.get(key), hashTableTSlice.get(value), hashTableUSlice.get(key))
+          }
+
+
+        case "T" => if (hashTableTSlice.contains(key)) {
+          hashTableTSlice(key) += ((key, value))
+        } else {
+          val listBuffer: mutable.ListBuffer[(String, String)] = ListBuffer()
+          listBuffer += ((key, value))
+          hashTableTSlice(key) = listBuffer
+        }
+          if (indirectPartitionMapper.contains(key)) {
+            val mappingList = indirectPartitionMapper.get(key).get
+            mappingList.foreach { item =>
+              val commonKey = item._2 // actually key of stream S
+              if (hashTableRSlice.contains(commonKey) && hashTableUSlice.contains(commonKey)) {
+                println(commonKey, hashTableRSlice.get(commonKey), item._1, value, hashTableUSlice.get(commonKey))
+              }
+            }
+          }
+
+        case "U" => if (hashTableUSlice.contains(key)) {
+          hashTableUSlice(key) += ((key, value))
+        } else {
+          val listBuffer: mutable.ListBuffer[(String, String)] = ListBuffer()
+          listBuffer += ((key, value))
+          hashTableUSlice(key) = listBuffer
+        }
+
+          if (hashTableRSlice.contains(key) && hashTableSSlice.contains(key)) {
+            // implementation of slice mapping
+            val mappingList = hashTableSSlice.get(key).get // list buffer of key values
+            mappingList.foreach { kvPair =>
+              if (hashTableTSlice.contains(kvPair._2)) {
+                println(key, hashTableRSlice.get(key), mappingList, hashTableTSlice.get(kvPair._2), value)
+              }
+            }
+            // implementation of slice mapping complete
+          }
+      }
+    }
   }
 
   def xJoin(k: String, v: String, m: mutable.HashMap[String, mutable.ListBuffer[String]], ix: Int): Unit = {
